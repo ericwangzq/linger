@@ -5,6 +5,8 @@ export interface CommandOption {
   readonly description: string;
   readonly boolean?: boolean;
   readonly repeatable?: boolean;
+  /** The input field this flag's JSON value fills; "" is the whole input. Help lists its fields. */
+  readonly json?: string;
 }
 
 export interface CommandArguments {

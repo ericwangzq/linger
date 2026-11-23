@@ -7,7 +7,7 @@ import {
   syncHostDirectory,
   protectWindowsDirectories,
 } from "./files/host-file-system.js";
-import { ConnectorError as CliError } from "./errors.js";
+import { CliError } from "./errors.js";
 import {
   record,
   type ConnectorRuntime,

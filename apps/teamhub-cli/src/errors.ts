@@ -1,21 +1,17 @@
+/**
+ * Where a failure's text was written. This CLI authors every local message
+ * and shows it as is; a remote one wraps TeamHub's or a provider's own prose,
+ * which is never shown, so the code's template replaces it.
+ */
+export type ErrorOrigin = "local" | "remote";
+
 export class CliError extends Error {
   constructor(
     readonly code: string,
     message: string,
     readonly details: Record<string, unknown> = {},
-    readonly trustedMessage = false,
+    readonly origin: ErrorOrigin = "local",
   ) {
     super(message);
-  }
-}
-
-/** Constant, authored Connector explanations; never wrap provider prose here. */
-export class ConnectorError extends CliError {
-  constructor(
-    code: string,
-    message: string,
-    details: Record<string, unknown> = {},
-  ) {
-    super(code, message, details, true);
   }
 }

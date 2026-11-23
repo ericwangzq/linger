@@ -20,6 +20,13 @@ import {
 import { parseActorReferences } from "./command-mentions.js";
 import { CliError } from "./errors.js";
 import {
+  flagPaths,
+  inputIssue,
+  invalidInput,
+  typeName,
+  zodInputIssues,
+} from "./input-issues.js";
+import {
   resolveConnectorAccount,
   validateAccountSelector,
 } from "./connector-runtime.js";
@@ -49,15 +56,25 @@ const listOptions = {
   "--limit": flag("Maximum items in this page; 1-100."),
   "--cursor": flag("Exact next_cursor returned by the previous page."),
 };
-const jsonOptions = (name: string, description: string) => ({
-  [`--${name}`]: flag(description),
+const jsonOptions = (
+  name: string,
+  description: string,
+  json = name.replaceAll("-", "_"),
+) => ({
+  [`--${name}`]: { ...flag(description), json },
   [`--${name}-file`]: flag(`Read ${name} JSON from a file or - for stdin.`),
 });
 const optional = (field: string, value: unknown): Json =>
   value === undefined ? {} : { [field]: value };
 const object = (value: unknown, label: string): Json => {
   if (value === null || typeof value !== "object" || Array.isArray(value))
-    invalid(`${label} must contain one JSON object.`);
+    throw invalidInput(`${label} must be one JSON object.`, [
+      inputIssue(
+        label,
+        "invalid_type",
+        `expected object; got ${typeName(value)}.`,
+      ),
+    ]);
   return value as Json;
 };
 const integer = (
@@ -76,17 +93,30 @@ const integer = (
     invalid(`${label} must be an integer from ${min} to ${max}.`);
   return Number(value);
 };
+const definitionsByTool = new Map<string, CommandDefinition>();
+/**
+ * Checks the wire input against the command's business schema. Each issue
+ * names the flag that set its field, or, when the whole input is one JSON
+ * flag (`root`), the field's path inside that JSON.
+ */
 async function validate(
   tool: string,
   input: Json,
   wire: Json = input,
+  root?: string,
 ): Promise<Json> {
   const schema = await loadAgentCommandSchema(tool);
-  if (schema && !schema.input.safeParse(wire).success)
-    invalid(
-      "Command input does not match its business schema. Run this command with --schema.",
-    );
-  return input;
+  const parsed = schema?.input.safeParse(wire);
+  if (!parsed || parsed.success) return input;
+  const command = definitionsByTool.get(tool);
+  const issues = zodInputIssues(parsed.error.issues, wire, {
+    root: root ?? "input",
+    schema: schema!.input,
+  });
+  throw invalidInput(
+    `The ${root ? `${root} JSON` : "input"} does not match ${command ? command.command.join(" ") : "this command"}.`,
+    root ? issues : flagPaths(issues, command?.options ?? {}),
+  );
 }
 function definition(
   command: string[],
@@ -96,7 +126,7 @@ function definition(
   normalize: CommandDefinition["normalize"],
   extras: Partial<CommandDefinition> = {},
 ): CommandDefinition {
-  return {
+  const created: CommandDefinition = {
     command,
     toolName,
     description,
@@ -109,6 +139,9 @@ function definition(
     render: (result) => renderBusinessResult(command.join(" "), result),
     ...extras,
   };
+  if (!definitionsByTool.has(toolName))
+    definitionsByTool.set(toolName, created);
+  return created;
 }
 function uniqueList(
   args: CommandArguments,
@@ -1130,6 +1163,12 @@ const routines = ["create", "list", "pause", "enable", "run", "delete"].map(
     ),
 );
 
+const itemFlag = (args: CommandArguments): string => {
+  if (option(args, "--item-file") !== undefined) return "--item-file";
+  if (option(args, "--item") === undefined)
+    invalid("Provide --item or --item-file.");
+  return "--item";
+};
 const trackingItemCommands = (
   [
     ["list", "list_tracking_items"],
@@ -1150,7 +1189,11 @@ const trackingItemCommands = (
             boolean: true,
           },
         }
-      : jsonOptions("item", "Tracking Item command JSON; see --schema."),
+      : jsonOptions(
+          "item",
+          "Tracking Item JSON; its fields are listed below.",
+          "",
+        ),
     async (args, reader) => {
       assertPositionals(args, 0);
       const input =
@@ -1167,9 +1210,16 @@ const trackingItemCommands = (
             }
           : object(
               await jsonSource(args, reader, "--item", "--item-file"),
-              "input",
+              itemFlag(args),
             );
-      return { input: await validate(tool, input) };
+      return {
+        input: await validate(
+          tool,
+          input,
+          input,
+          action === "list" ? undefined : itemFlag(args),
+        ),
+      };
     },
     {
       readOnly: action === "list",

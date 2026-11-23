@@ -9,7 +9,7 @@ import {
   syncHostDirectory,
 } from "./files/host-file-system.js";
 import type { CommandExecutionContext } from "./command-definition.js";
-import { ConnectorError as CliError } from "./errors.js";
+import { CliError } from "./errors.js";
 import { readBounded } from "./http-client.js";
 
 export interface ConnectorFile {

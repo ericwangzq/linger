@@ -21,7 +21,7 @@ import {
   type ConnectorRuntime,
   type Json,
 } from "./connector-runtime.js";
-import { ConnectorError as CliError } from "./errors.js";
+import { CliError } from "./errors.js";
 const descriptions = {
   search: "Find accessible Notion pages by title.",
   read: "Read the page body and report completeness explicitly.",

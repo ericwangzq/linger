@@ -127,6 +127,7 @@ export function createTeamHubClient(
             http_status: response.status,
             ...(operationId ? { operation_id: operationId } : {}),
           },
+          "remote",
         );
       }
       throw new CliError(
@@ -140,6 +141,7 @@ export function createTeamHubClient(
           http_status: response.status,
           ...(operationId ? { operation_id: operationId } : {}),
         },
+        "remote",
       );
     }
     if (operationId && response.status !== 204) {

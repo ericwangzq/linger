@@ -8,6 +8,7 @@ import type {
   NormalizedCommandInput,
 } from "./command-definition.js";
 import { CliError } from "./errors.js";
+import { inputIssue, invalidInput } from "./input-issues.js";
 
 const byteLimit = 5 * 1024 * 1024;
 export function option(
@@ -83,6 +84,20 @@ export function parseArguments(
       throw new CliError("usage", `Provide a value after ${name}.`);
     if (value.includes("\0"))
       throw new CliError("invalid_input", `${name} cannot contain NUL.`);
+    // "-" means stdin only where a path is expected. The inline twin of a
+    // file flag takes "-" literally, which nobody means to send.
+    const twin = name === "--content" ? "--file" : `${name}-file`;
+    if (value === "-" && Object.hasOwn(definitions, twin))
+      throw invalidInput(
+        `${name} takes the value itself and does not read stdin.`,
+        [
+          inputIssue(
+            name,
+            "invalid_value",
+            `"-" would be ${name === "--content" ? "sent" : "read"} as literal text; to read stdin use ${twin} -.`,
+          ),
+        ],
+      );
     if (value === "-" && (name === "--file" || name.endsWith("-file"))) {
       if (stdin)
         throw new CliError("usage", "Only one input source may read stdin.");

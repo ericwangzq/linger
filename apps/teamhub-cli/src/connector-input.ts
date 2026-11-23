@@ -1,6 +1,6 @@
 import type { CommandArguments } from "./command-definition.js";
 import { option, values } from "./command-input.js";
-import { ConnectorError as CliError } from "./errors.js";
+import { CliError } from "./errors.js";
 import type { Json } from "./connector-runtime.js";
 
 export const usage = (message: string): never => {

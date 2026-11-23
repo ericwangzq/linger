@@ -53,16 +53,14 @@ const templates: Record<string, string> = {
 };
 export function formatCommandError(
   error: CliError,
-  context: { command?: string; target?: CommandTarget; remote?: boolean },
+  context: { command?: string; target?: CommandTarget },
 ): CommandError {
   const key = error.code.toLowerCase();
-  // Never infer authority or existence from backend prose. Raw routing addresses,
-  // provider messages and credentials are not part of the public error contract.
-  const safeLocal =
-    !context.remote &&
-    !/\p{Script=Han}|(?:room|thread|task|taskmeta|meta):/u.test(error.message);
+  // This CLI authored every local message. Backend and provider prose never
+  // reaches the caller: it can reveal routing addresses or credentials, and
+  // authority or existence is never inferred from it.
   const message =
-    safeLocal || error.trustedMessage
+    error.origin === "local"
       ? singleLine(error.message)
       : key === "version_conflict" && !context.command?.startsWith("docs ")
         ? templates.conflict!
@@ -81,6 +79,7 @@ export function formatCommandError(
       "thread_id",
       "task_id",
       "issues",
+      "issues_omitted",
       "room_id",
       "message_id",
       "interaction_id",
@@ -168,6 +167,9 @@ export function renderCommandError(error: CommandError): string {
           .filter(Boolean)
           .join(": ")}`,
     ),
+    typeof error.details?.issues_omitted === "number"
+      ? `And ${error.details.issues_omitted} more issues.`
+      : "",
   ]
     .filter(Boolean)
     .join("\n");

@@ -13,6 +13,7 @@ import {
   teamHubData,
 } from "./http-client.js";
 import { CliError } from "./errors.js";
+import { fileFailure, fileSystemError } from "./input-issues.js";
 import type {
   NormalizedCommandInput,
   CommandTarget,
@@ -25,8 +26,8 @@ import {
 import type { CliTiming } from "./timing.js";
 import {
   commandSchema,
-  domainHelp,
   findCommand,
+  helpText,
   parseDomainCommand,
 } from "./domain-commands.js";
 
@@ -86,7 +87,6 @@ function externalOutcomeUnknown(error: unknown, operationId: string): CliError {
       operation_id: operationId,
       retryable: false,
     },
-    true,
   );
 }
 
@@ -97,7 +97,6 @@ export async function runCli(
   let json = args.includes("--json");
   let selected = findCommand(args);
   let target: CommandTarget | undefined;
-  let remote = false;
   try {
     if (
       !args.length ||
@@ -105,21 +104,21 @@ export async function runCli(
       (["--help", "-h"].includes(args[0]!) && args.length === 1)
     ) {
       const prefix = args[0] === "help" ? args.slice(1) : [];
-      const help = domainHelp(prefix);
+      const help = await helpText(prefix);
       if (!help)
         throw new CliError("usage", "Unknown command. Run teamhub --help.");
       await dependencies.stdout(help);
       return 0;
     }
     if (!selected && args.at(-1) === "--help") {
-      const help = domainHelp(args.slice(0, -1));
+      const help = await helpText(args.slice(0, -1));
       if (help) {
         await dependencies.stdout(help);
         return 0;
       }
     }
     if (!selected && args.every((value) => !value.startsWith("-"))) {
-      const help = domainHelp(args);
+      const help = await helpText(args);
       if (help) {
         await dependencies.stdout(help);
         return 0;
@@ -135,7 +134,7 @@ export async function runCli(
     selected = command.descriptor;
     json = command.json;
     if (command.route === "help") {
-      await dependencies.stdout(domainHelp(selected.command));
+      await dependencies.stdout(await helpText(selected.command));
       return 0;
     }
     if (command.route === "schema") {
@@ -154,7 +153,7 @@ export async function runCli(
         )
       : loadConfig(dependencies.env));
     if (selected.unavailableInTask && configured.scope?.kind === "task")
-      throw new CliError("forbidden", selected.unavailableInTask, {}, true);
+      throw new CliError("forbidden", selected.unavailableInTask);
     const stateRoot =
       dependencies.env.TEAMHUB_STATE_ROOT ??
       configurationDirectory(dependencies.env);
@@ -240,7 +239,6 @@ export async function runCli(
       // every request and is never added as an implicit collection filter.
       if (!scope) scope = configured.scope;
       if (selected!.prepare) {
-        remote = true;
         input = await selected!.prepare(input, {
           client: createTeamHubClient(
             { ...configured, scope: scope as TeamHubConfig["scope"] },
@@ -287,7 +285,6 @@ export async function runCli(
       };
       if (selected!.fileRoute) {
         const { executeFileCommand } = await import("./file-executor.js");
-        remote = true;
         await executeFileCommand(
           { route: selected!.fileRoute, body: input },
           client,
@@ -311,7 +308,6 @@ export async function runCli(
         ? await routes.encodeAgentCommandBody(toolName, input, operationId)
         : undefined;
       const execute = async (): Promise<Record<string, unknown>> => {
-        remote = true;
         if (selected!.execute)
           return selected!.execute(input, {
             client,
@@ -356,22 +352,26 @@ export async function runCli(
     const failure =
       error instanceof CliError
         ? error
-        : error instanceof Error &&
-            "code" in error &&
-            typeof error.code === "string"
-          ? new CliError(
-              error.code,
-              error.message,
-              "details" in error && record(error.details) ? error.details : {},
-            )
-          : new CliError(
-              "connection_failed",
-              "Could not complete the TeamHub operation.",
-            );
+        : fileSystemError(error)
+          ? fileFailure(error)
+          : error instanceof Error &&
+              "code" in error &&
+              typeof error.code === "string"
+            ? new CliError(error.code, error.message, {
+                ...("details" in error && record(error.details)
+                  ? error.details
+                  : {}),
+                ...("retryable" in error && typeof error.retryable === "boolean"
+                  ? { retryable: error.retryable }
+                  : {}),
+              })
+            : new CliError(
+                "connection_failed",
+                "Could not complete the TeamHub operation.",
+              );
     const formatted = formatCommandError(failure, {
       command: selected?.command.join(" "),
       target,
-      remote,
     });
     dependencies.stderr(
       (json
