@@ -150,6 +150,16 @@ function extractEvent(value: unknown): ParsedErrorEvent | undefined {
     return { code: "STACK_UP_FAILED", message };
   }
 
+  if (event.schema === "localmodels.stack-plan-error/v1") {
+    const code = text("code");
+    const causeCode = text("causeCode") ?? code;
+    return {
+      code: code ?? "STACK_PLAN_FAILED",
+      ...(causeCode ? { causeCode } : {}),
+      message: text("message"),
+    };
+  }
+
   if (
     (typeof event.schema === "string" &&
       /^localmodels\.[a-z-]+-error\/v1$/.test(event.schema)) ||

@@ -236,3 +236,24 @@ it("turns a pretty-printed localmodels.stack-up/v1 failure report into a redacte
   expect(failure.cause).not.toContain("sk-ant-0123456789abcdefghij");
   expect(failure.cause).not.toContain('"schema"');
 });
+
+it("extracts structured causeCode from localmodels.stack-plan-error/v1 while keeping redacted stderr cause", () => {
+  const failure = localmodelsFailure(["stack", "plan", "--json"], {
+    code: 2,
+    stdout: `${JSON.stringify({
+      schema: "localmodels.stack-plan-error/v1",
+      event: "error",
+      code: "HUB_UNREACHABLE",
+      hosts: ["huggingface.co", "hf-mirror.com"],
+    })}\n`,
+    stderr:
+      "stack: cannot reach huggingface.co (timed out) or hf-mirror.com (SSL EOF) to look up the model files\n",
+  });
+  expect(failure).toMatchObject({
+    code: "HUB_UNREACHABLE",
+    causeCode: "HUB_UNREACHABLE",
+    cause:
+      "stack: cannot reach huggingface.co (timed out) or hf-mirror.com (SSL EOF) to look up the model files",
+  });
+  expect(failure.log.join("")).toContain("HUB_UNREACHABLE");
+});

@@ -465,6 +465,7 @@ export class LocalServerModule implements Module {
   #attempt = 0;
   #origin: string | undefined;
   #resuming = false;
+  #busyCount = 0;
   #running: Promise<void> | undefined;
   #check: LocalModelsCheck = { state: "unchecked" };
   #checkedAt: number | undefined;
@@ -569,7 +570,22 @@ export class LocalServerModule implements Module {
     // The installer manager keeps running a started installation; it exits
     // by itself once idle.
     this.#abort.abort();
+    if (this.#busyCount > 0) {
+      this.#busyCount = 0;
+      this.#ctx?.bus.emit("local-server.busy", false);
+    }
     if (reason === "quit") await this.#stopLocalModels();
+  }
+
+  #acquireBusy(): void {
+    this.#busyCount += 1;
+    if (this.#busyCount === 1) this.#ctx?.bus.emit("local-server.busy", true);
+  }
+
+  #releaseBusy(): void {
+    if (this.#busyCount === 0) return;
+    this.#busyCount -= 1;
+    if (this.#busyCount === 0) this.#ctx?.bus.emit("local-server.busy", false);
   }
 
   // The Computer exits with the app, so after a quit nothing uses the local
@@ -1103,6 +1119,7 @@ export class LocalServerModule implements Module {
     const signal = this.#abort.signal;
     const home = this.#location ?? this.#home;
     this.#attempt += 1;
+    this.#acquireBusy();
     try {
       // A retry starts over from the first step.
       this.#step = "prepare";
@@ -1296,6 +1313,8 @@ export class LocalServerModule implements Module {
         windowsPrivateRefusal((error as { refusal?: unknown } | null)?.refusal),
       );
       throw error;
+    } finally {
+      this.#releaseBusy();
     }
   }
 
@@ -2552,6 +2571,7 @@ export class LocalServerModule implements Module {
     let stage = "fast_ready_check";
     this.#ctx?.log.info("local_server.resume_started");
     const windows = this.#ctx?.get<WindowManagerModule>("WindowManager");
+    this.#acquireBusy();
     try {
       const update = this.#sourceUpdate(record);
       if (update) {
@@ -2632,6 +2652,7 @@ export class LocalServerModule implements Module {
       this.#set("failed", message);
       windows?.showStartFailed(message);
     } finally {
+      this.#releaseBusy();
       this.#resuming = false;
     }
   }
@@ -3073,6 +3094,7 @@ interface Job {
   readonly message?: string;
   readonly origin?: string;
   readonly errorCode?: string;
+  readonly errorCauseCode?: string;
   readonly errorReasons?: readonly string[];
   // The deployment the installer asks to approve before a local model.
   readonly localModelsPlan?: { readonly planId: string };
@@ -3164,6 +3186,42 @@ const REPLAN_ONLY_CAUSES = new Set([
   "STACK_APPROVAL_MISMATCH",
   "STACK_PLAN_INVALID",
 ]);
+// Upstream apply failures where re-applying the same approved plan resumes
+// interrupted downloads or component setup without replanning over the network.
+const RETRY_APPLY_CAUSES = new Set([
+  "STACK_COMPONENT_FAILED",
+  "STACK_APPLY_INTERRUPTED",
+]);
+
+function formatInstallJobFailure(job: Job): string {
+  const detail = job.message ? ` (${job.message})` : "";
+  if (job.errorCode === "LOCAL_MODELS_UNAVAILABLE") {
+    switch (job.errorCauseCode) {
+      case "HUB_UNREACHABLE":
+        return `Couldn't reach the model download service to prepare the local model. Check your internet connection or proxy settings and try again, or choose another AI runtime.${detail}`;
+      case "DISK_INSUFFICIENT":
+        return `This computer doesn't have enough free disk space for the local model. Free up disk space, or choose another AI runtime, and try again.${detail}`;
+      case "GPU_CONFLICT":
+      case "STACK_PLAN_FAILED":
+        return `This computer can't run the local model right now. Choose another AI runtime and try again.${detail}`;
+      default:
+        // MEMORY_INSUFFICIENT, or an older localmodels kit that emits no
+        // structured stack-plan error code.
+        return `This computer can't run the local model right now. Close other programs to free memory, or choose another AI runtime, and try again.${detail}`;
+    }
+  }
+  const notReady = localModelNotReadyMessage(job.errorReasons);
+  if (LOCAL_MODEL_FAILURES.has(job.errorCode ?? "")) {
+    if (
+      !notReady &&
+      job.errorCauseCode &&
+      RETRY_APPLY_CAUSES.has(job.errorCauseCode)
+    )
+      return `Local model download or setup was interrupted. Check your internet connection and try again, or choose another AI runtime.${detail}`;
+    return `${notReady ? `${notReady} ` : ""}This computer can't run the local model right now. Choose another AI runtime and try again.${!notReady ? detail : ""}`;
+  }
+  return job.message || "The installation stopped";
+}
 
 // Why the local model stack was not ready, by the reason code localmodels'
 // setup binding gives.
@@ -3338,9 +3396,10 @@ export class InstallerApi {
     }
     // The person chose the local model after seeing what it needs, so its
     // deployment plan is approved here; once, against a plan that keeps
-    // changing. A deployment that stopped part way asks for a new plan
-    // first; that is asked for once too.
+    // changing. An interrupted deployment resumes the approved plan once before
+    // giving up; a stale or incompatible saved plan replans once.
     let approved: string | undefined;
+    let retriedApply = false;
     let replanned = false;
     // Where the bar last stood, kept while the installer cannot be reached.
     let shown: [LocalServerStep, number] | undefined;
@@ -3404,29 +3463,37 @@ export class InstallerApi {
         job.state === "waiting_user" &&
         job.errorCode === "LOCAL_MODELS_RECOVERY_REQUIRED" &&
         plan.runtime === "local" &&
-        !replanned &&
         !job.errorReasons?.includes("binding-unavailable")
       ) {
-        replanned = true;
-        onStep("services", 0, "Deploying the local model");
-        job = await this.#json<Job>(
-          `/api/jobs/${encodeURIComponent(job.id)}/retry`,
-          { localModelsReplan: true },
-        );
-        continue;
+        if (
+          approved &&
+          !retriedApply &&
+          job.errorCauseCode &&
+          RETRY_APPLY_CAUSES.has(job.errorCauseCode)
+        ) {
+          retriedApply = true;
+          onStep("services", 0, "Deploying the local model");
+          job = await this.#json<Job>(
+            `/api/jobs/${encodeURIComponent(job.id)}/retry`,
+            { localModelsApproval: approved },
+          );
+          continue;
+        }
+        if (
+          !replanned &&
+          (!job.errorCauseCode || REPLAN_ONLY_CAUSES.has(job.errorCauseCode))
+        ) {
+          replanned = true;
+          onStep("services", 0, "Deploying the local model");
+          job = await this.#json<Job>(
+            `/api/jobs/${encodeURIComponent(job.id)}/retry`,
+            { localModelsReplan: true },
+          );
+          continue;
+        }
       }
-      if (!["queued", "running"].includes(job.state)) {
-        const notReady = localModelNotReadyMessage(job.errorReasons);
-        throw new Error(
-          // Only the planner finding no model that fits can be helped by
-          // freeing memory; free memory is what it measures at that moment.
-          job.errorCode === "LOCAL_MODELS_UNAVAILABLE"
-            ? `This computer can't run the local model right now. Close other programs to free memory, or choose another AI runtime, and try again.${job.message ? ` (${job.message})` : ""}`
-            : LOCAL_MODEL_FAILURES.has(job.errorCode ?? "")
-              ? `${notReady ? `${notReady} ` : ""}This computer can't run the local model right now. Choose another AI runtime and try again.${!notReady && job.message ? ` (${job.message})` : ""}`
-              : job.message || "The installation stopped",
-        );
-      }
+      if (!["queued", "running"].includes(job.state))
+        throw new Error(formatInstallJobFailure(job));
       await delay(this.#pollMs, undefined, { signal });
       job = await this.#poll(job.id, signal, () => {
         if (shown) onStep(shown[0], shown[1], "Reconnecting to the installer…");

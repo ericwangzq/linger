@@ -66,7 +66,8 @@ localmodels installed without extension support) remains. Only a plan the
 person approved is ever applied, and a stack still not ready ends
 `LOCAL_MODELS_RECOVERY_REQUIRED` with the binding's reason codes in
 `details.reasons` (exposed on jobs as `errorReasons`) and any upstream stack
-guard code in `details.causeCode`. When the services already run, a
+guard or plan error code in `details.causeCode` (exposed on jobs as
+`errorCauseCode`). When the services already run, a
 local-models setup whose Computer still uses the local model source
 (`model-source.json` says `local` or does not exist yet) has its stack checked
 once (`restoreLocalModels`), since a quit stops the models but not the

@@ -194,6 +194,29 @@ test("reports why the planner refused and logs its output", async () => {
   });
   expect(events.join("\n")).toContain("localmodels stack plan exited with");
 });
+test("preserves structured stack-plan causeCode when the planner cannot reach the Hub", async () => {
+  const f = await fixture();
+  f.call.mockImplementation(async () => ({
+    code: 2,
+    stdout: `${JSON.stringify({
+      schema: "localmodels.stack-plan-error/v1",
+      event: "error",
+      code: "HUB_UNREACHABLE",
+      hosts: ["huggingface.co", "hf-mirror.com"],
+    })}\n`,
+    stderr: "stack: cannot reach hf-mirror.com to look up the model files\n",
+  }));
+  const result = await prepareLocalModels(f.instance, f.options, {
+    localmodels: f.call,
+  });
+  expect(result).toMatchObject({
+    details: {
+      code: "LOCAL_MODELS_UNAVAILABLE",
+      causeCode: "HUB_UNREACHABLE",
+    },
+    message: expect.stringContaining("cannot reach hf-mirror.com"),
+  });
+});
 test("never records a successful binding when apply fails", async () => {
   const f = await fixture();
   await prepareLocalModels(f.instance, f.options, { localmodels: f.call });

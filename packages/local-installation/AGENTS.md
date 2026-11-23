@@ -205,7 +205,8 @@ kits under `<home>/tools/localmodels/<sha256>` stay on disk so existing
 deployments' launchers remain runnable) and falls back to `stack apply` only
 when `stack up` fails or the binding still needs repair (such as
 `pi-extensions-unavailable`). Structured `localmodels.stack-error/v1`,
-`stack apply` result, and `localmodels.stack-up/v1` failures are translated to
+`localmodels.stack-plan-error/v1`, `stack apply` result, and
+`localmodels.stack-up/v1` failures are translated to
 redacted human-readable messages with their `causeCode` in `details.causeCode`,
 and an unreviewable saved plan returns `LOCAL_MODELS_RECOVERY_REQUIRED` with
 `STACK_PLAN_INVALID`. `restoreLocalModels` (`local-models.ts`) brings back a

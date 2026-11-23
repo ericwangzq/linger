@@ -274,7 +274,7 @@ const DONE = {
 // a retried job runs to DONE.
 const installerApi = (
   jobs: Record<string, unknown>[] = [],
-  finish: Record<string, unknown> = DONE,
+  finish: Record<string, unknown> | Record<string, unknown>[] = DONE,
   setup: Response = Response.json({ recommendation: "local-models" }),
   running: Record<string, unknown> | Record<string, unknown>[] = {
     state: "running",
@@ -283,6 +283,7 @@ const installerApi = (
   // Whether the instance's login exists before a job is created.
   installed = true,
 ) => {
+  const finishes = Array.isArray(finish) ? finish : [finish];
   const updates = [running].flat();
   const created: unknown[] = [];
   const retried: unknown[] = [];
@@ -346,9 +347,7 @@ const installerApi = (
         job(
           ++polls <= updates.length
             ? updates[polls - 1]!
-            : retried.length
-              ? DONE
-              : finish,
+            : (finishes[retried.length] ?? DONE),
         ),
       );
     if (url.pathname === `/api/instances/${LOCAL_INSTANCE}/login`)
@@ -2014,6 +2013,190 @@ describe("LocalServerModule", () => {
       "Close other programs to free memory",
     );
     await f.host.stop("quit");
+  });
+
+  it("reports Hub reachability and disk failures accurately without blaming memory", async () => {
+    for (const [causeCode, expected, forbidden] of [
+      [
+        "HUB_UNREACHABLE",
+        "Couldn't reach the model download service",
+        "free memory",
+      ],
+      ["DISK_INSUFFICIENT", "enough free disk space", "free memory"],
+      [
+        "GPU_CONFLICT",
+        "Choose another AI runtime and try again.",
+        "free memory",
+      ],
+      [
+        "STACK_PLAN_FAILED",
+        "Choose another AI runtime and try again.",
+        "free memory",
+      ],
+      ["MEMORY_INSUFFICIENT", "Close other programs to free memory", "disk"],
+    ] as const) {
+      const f = fixture(
+        withCheckout,
+        {},
+        checkout,
+        installerApi([], {
+          state: "waiting_user",
+          errorCode: "LOCAL_MODELS_UNAVAILABLE",
+          errorCauseCode: causeCode,
+          message: `upstream cause ${causeCode}`,
+        }),
+      );
+      await f.host.start();
+      const failure = f.module.begin({ runtime: "local" });
+      await expect(failure).rejects.toThrow(expected);
+      await expect(failure).rejects.not.toThrow(forbidden);
+      await f.host.stop("quit");
+    }
+  });
+
+  it("retries the approved plan once on interrupted download instead of blind replanning", async () => {
+    const planId = "a".repeat(64);
+    const f = fixture(
+      withCheckout,
+      {},
+      checkout,
+      installerApi(
+        [],
+        [
+          {
+            state: "waiting_user",
+            errorCode: "LOCAL_MODELS_APPROVAL_REQUIRED",
+            localModelsPlan: { planId },
+          },
+          {
+            state: "waiting_user",
+            errorCode: "LOCAL_MODELS_RECOVERY_REQUIRED",
+            errorCauseCode: "STACK_COMPONENT_FAILED",
+            message: "Local model setup failed at: llm.",
+          },
+          DONE,
+        ],
+      ),
+    );
+    await f.host.start();
+    await f.module.begin({ runtime: "local" });
+    expect(f.api.retried).toEqual([
+      { localModelsApproval: planId },
+      { localModelsApproval: planId },
+    ]);
+    expect(f.module.status().phase).toBe("ready");
+    await f.host.stop("quit");
+  });
+
+  it("stops without blind replanning when retrying the approved plan fails again with STACK_COMPONENT_FAILED", async () => {
+    const planId = "a".repeat(64);
+    const f = fixture(
+      withCheckout,
+      {},
+      checkout,
+      installerApi(
+        [],
+        [
+          {
+            state: "waiting_user",
+            errorCode: "LOCAL_MODELS_APPROVAL_REQUIRED",
+            localModelsPlan: { planId },
+          },
+          {
+            state: "waiting_user",
+            errorCode: "LOCAL_MODELS_RECOVERY_REQUIRED",
+            errorCauseCode: "STACK_COMPONENT_FAILED",
+            message: "Local model setup failed at: llm.",
+          },
+          {
+            state: "waiting_user",
+            errorCode: "LOCAL_MODELS_RECOVERY_REQUIRED",
+            errorCauseCode: "STACK_COMPONENT_FAILED",
+            message: "Local model setup failed at: llm.",
+          },
+        ],
+      ),
+    );
+    await f.host.start();
+    const failure = f.module.begin({ runtime: "local" });
+    await expect(failure).rejects.toThrow(
+      "Local model download or setup was interrupted",
+    );
+    await expect(failure).rejects.not.toThrow("free memory");
+    expect(f.api.retried).toEqual([
+      { localModelsApproval: planId },
+      { localModelsApproval: planId },
+    ]);
+    await f.host.stop("quit");
+  });
+
+  it("still replans once when an approved plan fails with a replan-only guard code", async () => {
+    const firstPlan = "a".repeat(64);
+    const secondPlan = "b".repeat(64);
+    const f = fixture(
+      withCheckout,
+      {},
+      checkout,
+      installerApi(
+        [],
+        [
+          {
+            state: "waiting_user",
+            errorCode: "LOCAL_MODELS_APPROVAL_REQUIRED",
+            localModelsPlan: { planId: firstPlan },
+          },
+          {
+            state: "waiting_user",
+            errorCode: "LOCAL_MODELS_RECOVERY_REQUIRED",
+            errorCauseCode: "STACK_PLAN_CHANGED",
+          },
+          {
+            state: "waiting_user",
+            errorCode: "LOCAL_MODELS_APPROVAL_REQUIRED",
+            localModelsPlan: { planId: secondPlan },
+          },
+          DONE,
+        ],
+      ),
+    );
+    await f.host.start();
+    await f.module.begin({ runtime: "local" });
+    expect(f.api.retried).toEqual([
+      { localModelsApproval: firstPlan },
+      { localModelsReplan: true },
+      { localModelsApproval: secondPlan },
+    ]);
+    expect(f.module.status().phase).toBe("ready");
+    await f.host.stop("quit");
+  });
+
+  it("emits local-server.busy while installing and releases it on both success and failure", async () => {
+    const events: boolean[] = [];
+    const ok = fixture(withCheckout, {}, checkout, installerApi());
+    ok.bus.on("local-server.busy", (busy) => events.push(busy));
+    await ok.host.start();
+    await ok.module.begin({ runtime: "local" });
+    expect(events).toEqual([true, false]);
+    await ok.host.stop("quit");
+
+    events.length = 0;
+    const failed = fixture(
+      withCheckout,
+      {},
+      checkout,
+      installerApi([], {
+        state: "waiting_user",
+        errorCode: "LOCAL_MODELS_UNAVAILABLE",
+        errorCauseCode: "HUB_UNREACHABLE",
+      }),
+    );
+    failed.bus.on("local-server.busy", (busy) => events.push(busy));
+    await failed.host.start();
+    await expect(failed.module.begin({ runtime: "local" })).rejects.toThrow(
+      "model download service",
+    );
+    expect(events).toEqual([true, false]);
+    await failed.host.stop("quit");
   });
 
   it("starts again past an attempt that stopped waiting for the person", async () => {

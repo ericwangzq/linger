@@ -249,7 +249,15 @@ Gateway and runs Agents. The daemon exits with the app.
   Try Again or Set Up Again for transient `LOCAL_MODELS_RECOVERY_REQUIRED`
   failures (the resume applies the approved plan again). During Quick Install,
   `LOCAL_MODELS_RECOVERY_REQUIRED` with `binding-unavailable` in
-  `errorReasons` skips blind replanning and surfaces the structured reason copy. A Quick Install that stopped
+  `errorReasons` skips blind replanning and surfaces the structured reason copy;
+  transient apply failures (`STACK_COMPONENT_FAILED`, `STACK_APPLY_INTERRUPTED`)
+  after a plan was approved in the same run retry that approved plan once to
+  resume downloads instead of forcing a replan, while `LOCAL_MODELS_UNAVAILABLE`
+  selects user guidance by `errorCauseCode` (`HUB_UNREACHABLE`,
+  `DISK_INSUFFICIENT`, `GPU_CONFLICT`, `STACK_PLAN_FAILED`, or memory when
+  `MEMORY_INSUFFICIENT`/absent). While installing or resuming, `LocalServer`
+  emits `local-server.busy` so `PowerGuard` keeps the system from suspending
+  mid-download without toggling the saved `preventSleep` preference. A Quick Install that stopped
   before the computer enrolled is not resumed: setup shows again and Install
   finishes it, reusing a finished job only while its origin answers (a stopped
   server gets a new job, which starts the services again). The start failure
