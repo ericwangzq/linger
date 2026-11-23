@@ -421,7 +421,9 @@ def build_dmg(stage, workdir, output, volume_name):
         'dmg dmg vol.hfs out.dmg'
     )
     dmgtool(workdir, "sh", "-ec", script, "_", volume_name)
-    shutil.move(os.path.join(workdir, "out.dmg"), output)
+    # The container writes out.dmg as root; a copy is this user's to sign.
+    shutil.copyfile(os.path.join(workdir, "out.dmg"), output)
+    os.remove(os.path.join(workdir, "out.dmg"))
 
 
 def update_archive(app, output):
