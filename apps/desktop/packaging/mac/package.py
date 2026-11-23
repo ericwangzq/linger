@@ -48,6 +48,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import urllib.request
 import zipfile
@@ -244,6 +245,68 @@ def macho_files(app):
     return sorted(found)
 
 
+def _be32(data, at):
+    return int.from_bytes(data[at:at + 4], "big")
+
+
+def _le32(data, at):
+    return int.from_bytes(data[at:at + 4], "little")
+
+
+def developer_id_signed(data):
+    """Whether every slice of the Mach-O in data has a certificate signature
+    with the hardened runtime, which notarization requires. A linker's ad-hoc
+    signature has neither."""
+    if data[:4] == FAT_MAGIC:
+        entries = [8 + 20 * index for index in range(_be32(data, 4))]
+        images = [data[_be32(data, at + 8):_be32(data, at + 8) + _be32(data, at + 12)] for at in entries]
+    else:
+        images = [data]
+    for image in images:
+        if image[:4] != b"\xcf\xfa\xed\xfe":
+            return False
+        signature, cursor = b"", 32
+        for _ in range(_le32(image, 16)):
+            if _le32(image, cursor) == 0x1D:  # LC_CODE_SIGNATURE
+                start = _le32(image, cursor + 8)
+                signature = image[start:start + _le32(image, cursor + 12)]
+            cursor += _le32(image, cursor + 4)
+        if _be32(signature, 0) != 0xFADE0CC0:  # embedded signature superblob
+            return False
+        blobs = {_be32(signature, 12 + 8 * index): signature[_be32(signature, 16 + 8 * index):]
+                 for index in range(_be32(signature, 8))}
+        flags = _be32(blobs.get(0, b""), 12)  # the CodeDirectory's flags
+        cms = blobs.get(0x10000, b"")  # the CMS signature blob, empty when ad-hoc
+        if flags & 0x2 or not flags & 0x10000 or _be32(cms, 4) <= 8:
+            return False
+    return True
+
+
+def unsigned_archive_files(archive):
+    """Mach-O files in the tar.gz archive that lack a Developer ID signature."""
+    unsigned = []
+    with tarfile.open(archive) as tar:
+        for member in tar:
+            if member.isfile():
+                data = tar.extractfile(member).read()
+                if data[:4] in MACHO_MAGIC and not developer_id_signed(data):
+                    unsigned.append(member.name)
+    return unsigned
+
+
+def check_bundled_archives(app):
+    """Apple inspects the archives inside the app and refuses to notarize it
+    while one holds a Mach-O file without a Developer ID signature."""
+    native = os.path.join(app, NATIVE)
+    for name in sorted(os.listdir(native)) if os.path.isdir(native) else []:
+        if name.endswith(".tar.gz"):
+            unsigned = unsigned_archive_files(os.path.join(native, name))
+            if unsigned:
+                sys.exit(f"{name} holds {len(unsigned)} Mach-O files without a Developer ID signature "
+                         f"(first: {unsigned[0]}); sign it with packaging/mac/sign_native_archives.py "
+                         "(docs/desktop-release.md)")
+
+
 def signing_scopes(app, path):
     """rcodesign scopes that select every architecture of the Mach-O at path.
 
@@ -398,6 +461,8 @@ def main():
         workdir = tempfile.mkdtemp(prefix=f"linger-dmg-{arch}-")
         try:
             stage, app = stage_app(arch, version, electron_version, workdir, args.cache)
+            if args.notary_key:
+                check_bundled_archives(app)
             signing.sign_app(app, f"darwin-{arch}")
             # The stapled app carries its ticket into the DMG and the update.
             signing.notarize(app)

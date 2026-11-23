@@ -119,6 +119,26 @@ new archive there before tagging:
 gh release upload native-deps <archive> --repo simplexai-labs/linger
 ```
 
+Apple inspects the archives inside a notarized app, so the macOS archives
+(PostgreSQL and the voice tools) carry a Developer ID signature with the
+hardened runtime on every Mach-O file inside them. Their builds leave only the
+linker's ad-hoc signature, so sign a new macOS archive once, on a Mac with the
+Developer ID `.p12`, before uploading it:
+
+```sh
+scripts/ci/desktop-release.sh fetch-native darwin-arm64
+cd apps/desktop && python3 packaging/mac/sign_native_archives.py --developer-id DeveloperID.p12
+```
+
+It asks for the `.p12` password, writes each signed archive beside the
+original in `LINGER_NATIVE_POSTGRES_DIR` under the name with its new sha256,
+and updates the pins in `distribution/darwin-arm64.json`; archives already
+signed are left alone. Upload the new archives and commit the pins. The
+archive is signed once rather than at every release because installs unpack
+each new sha256 into a folder of its own. A release with `MACOS_NOTARY_KEY_JSON`
+stops before signing the app when a bundled archive still holds an unsigned
+Mach-O file.
+
 ### First release in simplexai-labs/linger
 
 1. Check that the `native-deps` prerelease has every pinned archive.
@@ -503,8 +523,10 @@ the generated API key and secret in the owner-only `livekit.env` of the
 instance, logs in `native/logs/livekit.log`. ICE over TCP stays off because
 LiveKit binds it on every interface. Without the tools for the computer, or
 when they fail to prepare, Native logs it, keeps voice off, gives TeamHub
-`TEAMHUB_VOICE_MEDIA=off` and finishes the install. The macOS tools are ad-hoc signed by their linker and
-live in the archive, outside the app's signature, like PostgreSQL.
+`TEAMHUB_VOICE_MEDIA=off` and finishes the install. The macOS tools live in
+the archive, outside the app's signature, like PostgreSQL; their Mach-O files
+are signed with the Developer ID before the archive is pinned (see
+[Bundled archives](#bundled-archives)).
 
 A build with a source package for `win32-x64`, `linux-x64` or `darwin-arm64`
 also ships TeamHub prebuilt (`scripts/build-teamhub.mjs`): build.mjs
