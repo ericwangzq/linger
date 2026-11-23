@@ -227,6 +227,9 @@ def bundled_node(path):
 MACHO_MAGIC = {b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe"}
 
 
+FAT_MAGIC = b"\xca\xfe\xba\xbe"
+
+
 def macho_files(app):
     """Bundle-relative paths of the Mach-O files in app, sorted."""
     found = []
@@ -239,6 +242,21 @@ def macho_files(app):
                 if source.read(4) in MACHO_MAGIC:
                     found.append(os.path.relpath(path, app))
     return sorted(found)
+
+
+def signing_scopes(app, path):
+    """rcodesign scopes that select every architecture of the Mach-O at path.
+
+    rcodesign reads the text after the last "@" of a scope as an architecture
+    selector, so a path under an npm scope (node_modules/@img/...) names each
+    slice explicitly instead; rcodesign numbers a thin file's only slice 0.
+    """
+    if "@" not in path:
+        return [path]
+    with open(os.path.join(app, path), "rb") as source:
+        header = source.read(8)
+    slices = int.from_bytes(header[4:8], "big") if header[:4] == FAT_MAGIC else 1
+    return [f"{path}@{index}" for index in range(slices)]
 
 
 class Signing:
@@ -273,12 +291,13 @@ class Signing:
         scoped = []
         for path in macho_files(app):
             javascript = path.startswith("Contents/MacOS/") or ".app/Contents/MacOS/" in path
-            if self.developer_id:
-                scoped += ["--code-signature-flags", f"{path}:runtime"]
-            if bundled_node(path):
-                scoped += ["--entitlements-xml-file", f"{path}:{node_entitlements}"]
-            elif self.developer_id and javascript:
-                scoped += ["--entitlements-xml-file", f"{path}:{entitlements}"]
+            for scope in signing_scopes(app, path):
+                if self.developer_id:
+                    scoped += ["--code-signature-flags", f"{scope}:runtime"]
+                if bundled_node(path):
+                    scoped += ["--entitlements-xml-file", f"{scope}:{node_entitlements}"]
+                elif self.developer_id and javascript:
+                    scoped += ["--entitlements-xml-file", f"{scope}:{entitlements}"]
         check = ["--for-notarization"] if self.notary_key else []
         depth = ["--shallow"] if shallow else []
         return [self.rcodesign, "sign", *self._identity(), *check, *depth, *scoped,

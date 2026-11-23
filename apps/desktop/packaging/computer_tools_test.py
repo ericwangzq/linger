@@ -202,6 +202,26 @@ class MacSigningTest(unittest.TestCase):
         self.assertIn("Contents/Resources/cli/computer-tools/cua/CuaDriver.app",
                       args[args.index("--exclude") + 1])
 
+    def test_npm_scope_paths_name_each_architecture(self):
+        app = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, app)
+        modules = os.path.join(app, "Contents", "Resources", "node_modules")
+        thin = os.path.join(modules, "@img", "sharp", "sharp.node")
+        fat = os.path.join(modules, "@cua", "driver")
+        plain = os.path.join(modules, "canvas", "skia.node")
+        for path, data in ((thin, MACHO), (fat, b"\xca\xfe\xba\xbe\0\0\0\2" + b"\0" * 24), (plain, MACHO)):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as out:
+                out.write(data)
+        args = self.mac.Signing("rcodesign", "id.p12", "id.password").app_args(app)
+        flags = [args[i + 1] for i, arg in enumerate(args) if arg == "--code-signature-flags"]
+        self.assertEqual(flags, [
+            "Contents/Resources/node_modules/@cua/driver@0:runtime",
+            "Contents/Resources/node_modules/@cua/driver@1:runtime",
+            "Contents/Resources/node_modules/@img/sharp/sharp.node@0:runtime",
+            "Contents/Resources/node_modules/canvas/skia.node:runtime",
+        ])
+
 
 class ArchiveHelperTest(unittest.TestCase):
     def setUp(self):
